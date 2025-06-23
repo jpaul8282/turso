@@ -785,10 +785,12 @@ impl BTreeCursor {
         std::mem::swap(payload, &mut payload_swap);
 
         let mut reuse_immutable = self.get_immutable_record_or_create();
-        crate::storage::sqlite3_ondisk::read_record(
-            &payload_swap,
-            reuse_immutable.as_mut().unwrap(),
-        )?;
+
+        reuse_immutable
+            .as_mut()
+            .unwrap()
+            .start_serialization(&payload_swap);
+        self.record_cursor.borrow_mut().invalidate();
 
         let _ = read_overflow_state.take();
         Ok(CursorResult::Ok(()))
@@ -1582,10 +1584,11 @@ impl BTreeCursor {
                 if let Some(next_page) = first_overflow_page {
                     return_if_io!(self.process_overflow_read(payload, *next_page, *payload_size))
                 } else {
-                    crate::storage::sqlite3_ondisk::read_record(
-                        payload,
-                        self.get_immutable_record_or_create().as_mut().unwrap(),
-                    )?
+                    self.get_immutable_record_or_create()
+                        .as_mut()
+                        .unwrap()
+                        .start_serialization(payload);
+                    self.record_cursor.borrow_mut().invalidate();
                 };
                 let (target_leaf_page_is_in_left_subtree, is_eq) = {
                     let record = self.get_immutable_record();
@@ -1870,10 +1873,12 @@ impl BTreeCursor {
             if let Some(next_page) = first_overflow_page {
                 return_if_io!(self.process_overflow_read(payload, *next_page, *payload_size))
             } else {
-                crate::storage::sqlite3_ondisk::read_record(
-                    payload,
-                    self.get_immutable_record_or_create().as_mut().unwrap(),
-                )?
+                self.get_immutable_record_or_create()
+                    .as_mut()
+                    .unwrap()
+                    .start_serialization(payload);
+
+                self.record_cursor.borrow_mut().invalidate();
             };
             let (_, found) = self.compare_with_current_record(key, seek_op);
             moving_up_to_parent.set(false);
@@ -1968,10 +1973,12 @@ impl BTreeCursor {
             if let Some(next_page) = first_overflow_page {
                 return_if_io!(self.process_overflow_read(payload, *next_page, *payload_size))
             } else {
-                crate::storage::sqlite3_ondisk::read_record(
-                    payload,
-                    self.get_immutable_record_or_create().as_mut().unwrap(),
-                )?
+                self.get_immutable_record_or_create()
+                    .as_mut()
+                    .unwrap()
+                    .start_serialization(payload);
+
+                self.record_cursor.borrow_mut().invalidate();
             };
             let (cmp, found) = self.compare_with_current_record(key, seek_op);
             if found {
@@ -2040,10 +2047,12 @@ impl BTreeCursor {
         if let Some(next_page) = next_page {
             self.process_overflow_read(payload, next_page, payload_size)
         } else {
-            crate::storage::sqlite3_ondisk::read_record(
-                payload,
-                self.get_immutable_record_or_create().as_mut().unwrap(),
-            )?;
+            self.get_immutable_record_or_create()
+                .as_mut()
+                .unwrap()
+                .start_serialization(payload);
+
+            self.record_cursor.borrow_mut().invalidate();
             Ok(CursorResult::Ok(()))
         }
     }
@@ -4053,6 +4062,7 @@ impl BTreeCursor {
             .as_mut()
             .unwrap()
             .invalidate();
+        self.record_cursor.borrow_mut().invalidate();
     }
 
     #[instrument(skip_all, level = Level::INFO)]
@@ -4184,10 +4194,11 @@ impl BTreeCursor {
         if let Some(next_page) = first_overflow_page {
             return_if_io!(self.process_overflow_read(payload, next_page, payload_size))
         } else {
-            crate::storage::sqlite3_ondisk::read_record(
-                payload,
-                self.get_immutable_record_or_create().as_mut().unwrap(),
-            )?
+            self.get_immutable_record_or_create()
+                .as_mut()
+                .unwrap()
+                .start_serialization(payload);
+            self.record_cursor.borrow_mut().invalidate();
         };
 
         *self.parse_record_state.borrow_mut() = ParseRecordState::Init;
