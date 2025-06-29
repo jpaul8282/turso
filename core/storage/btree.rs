@@ -520,6 +520,7 @@ impl BTreeCursor {
         pager: Rc<Pager>,
         root_page: usize,
         collations: Vec<CollationSeq>,
+        num_columns: usize,
     ) -> Self {
         Self {
             mv_cursor,
@@ -545,7 +546,7 @@ impl BTreeCursor {
             read_overflow_state: RefCell::new(None),
             find_cell_state: FindCellState(None),
             parse_record_state: RefCell::new(ParseRecordState::Init),
-            record_cursor: RefCell::new(RecordCursor::new()),
+            record_cursor: RefCell::new(RecordCursor::with_capacity(num_columns)),
         }
     }
 
@@ -553,8 +554,9 @@ impl BTreeCursor {
         mv_cursor: Option<Rc<RefCell<MvCursor>>>,
         pager: Rc<Pager>,
         root_page: usize,
+        num_columns: usize,
     ) -> Self {
-        Self::new(mv_cursor, pager, root_page, Vec::new())
+        Self::new(mv_cursor, pager, root_page, Vec::new(), num_columns)
     }
 
     pub fn new_index(
@@ -563,8 +565,9 @@ impl BTreeCursor {
         root_page: usize,
         index: &Index,
         collations: Vec<CollationSeq>,
+        num_columns: usize,
     ) -> Self {
-        let mut cursor = Self::new(mv_cursor, pager, root_page, collations);
+        let mut cursor = Self::new(mv_cursor, pager, root_page, collations, num_columns);
         cursor.index_key_info = Some(IndexKeyInfo::new_from_index(index));
         cursor
     }
@@ -5946,6 +5949,7 @@ impl BTreeCursor {
             .do_allocate_page(page_type, offset, BtreePageAllocMode::Any)
     }
 
+    #[inline(always)]
     pub fn get_column(&self, idx: usize) -> Result<RefValue> {
         let record_ref = self.reusable_immutable_record.borrow();
         let record = record_ref
@@ -7513,7 +7517,8 @@ mod tests {
     }
 
     fn validate_btree(pager: Rc<Pager>, page_idx: usize) -> (usize, bool) {
-        let cursor = BTreeCursor::new_table(None, pager.clone(), page_idx);
+        let num_columns = 5;
+        let cursor = BTreeCursor::new_table(None, pager.clone(), page_idx, num_columns);
         let page = cursor.read_page(page_idx).unwrap();
         while page.get().is_locked() {
             pager.io.run_once().unwrap();
@@ -7630,7 +7635,9 @@ mod tests {
     }
 
     fn format_btree(pager: Rc<Pager>, page_idx: usize, depth: usize) -> String {
-        let cursor = BTreeCursor::new_table(None, pager.clone(), page_idx);
+        let num_columns = 5;
+
+        let cursor = BTreeCursor::new_table(None, pager.clone(), page_idx, num_columns);
         let page = cursor.read_page(page_idx).unwrap();
         while page.get().is_locked() {
             pager.io.run_once().unwrap();
@@ -7758,7 +7765,9 @@ mod tests {
             .as_slice(),
         ] {
             let (pager, root_page, _, _) = empty_btree();
-            let mut cursor = BTreeCursor::new_table(None, pager.clone(), root_page);
+            let num_columns = 5;
+
+            let mut cursor = BTreeCursor::new_table(None, pager.clone(), root_page, num_columns);
             for (key, size) in sequence.iter() {
                 run_until_done(
                     || {
@@ -7821,9 +7830,11 @@ mod tests {
         let (mut rng, seed) = rng_from_time_or_env();
         let mut seen = HashSet::new();
         tracing::info!("super seed: {}", seed);
+        let num_columns = 5;
+
         for _ in 0..attempts {
             let (pager, root_page, _db, conn) = empty_btree();
-            let mut cursor = BTreeCursor::new_table(None, pager.clone(), root_page);
+            let mut cursor = BTreeCursor::new_table(None, pager.clone(), root_page, num_columns);
             let mut keys = SortedVec::new();
             tracing::info!("seed: {}", seed);
             for insert_id in 0..inserts {
@@ -7937,6 +7948,7 @@ mod tests {
 
     fn btree_index_insert_fuzz_run(attempts: usize, inserts: usize) {
         use crate::storage::pager::CreateBTreeFlags;
+        let num_columns = 5;
 
         let (mut rng, seed) = if std::env::var("SEED").is_ok() {
             let seed = std::env::var("SEED").unwrap();
@@ -7958,7 +7970,8 @@ mod tests {
                     panic!("btree_create returned IO in test, unexpected")
                 }
             };
-            let mut cursor = BTreeCursor::new_table(None, pager.clone(), index_root_page);
+            let mut cursor =
+                BTreeCursor::new_table(None, pager.clone(), index_root_page, num_columns);
             let mut keys = SortedVec::new();
             tracing::info!("seed: {}", seed);
             for i in 0..inserts {
@@ -8239,7 +8252,9 @@ mod tests {
     #[ignore]
     pub fn test_clear_overflow_pages() -> Result<()> {
         let pager = setup_test_env(5);
-        let mut cursor = BTreeCursor::new_table(None, pager.clone(), 1);
+        let num_columns = 5;
+
+        let mut cursor = BTreeCursor::new_table(None, pager.clone(), 1, num_columns);
 
         let max_local = payload_overflow_threshold_max(PageType::TableLeaf, 4096);
         let usable_size = cursor.usable_space();
@@ -8340,7 +8355,9 @@ mod tests {
     #[test]
     pub fn test_clear_overflow_pages_no_overflow() -> Result<()> {
         let pager = setup_test_env(5);
-        let mut cursor = BTreeCursor::new_table(None, pager.clone(), 1);
+        let num_columns = 5;
+
+        let mut cursor = BTreeCursor::new_table(None, pager.clone(), 1, num_columns);
 
         let small_payload = vec![b'A'; 10];
 
@@ -8384,7 +8401,9 @@ mod tests {
     fn test_btree_destroy() -> Result<()> {
         let initial_size = 1;
         let pager = setup_test_env(initial_size);
-        let mut cursor = BTreeCursor::new_table(None, pager.clone(), 2);
+        let num_columns = 5;
+
+        let mut cursor = BTreeCursor::new_table(None, pager.clone(), 2, num_columns);
 
         // Initialize page 2 as a root page (interior)
         let root_page = cursor.allocate_page(PageType::TableInterior, 0)?;
@@ -9060,8 +9079,10 @@ mod tests {
     pub fn btree_insert_sequential() {
         let (pager, root_page, _, _) = empty_btree();
         let mut keys = Vec::new();
+        let num_columns = 5;
+
         for i in 0..10000 {
-            let mut cursor = BTreeCursor::new_table(None, pager.clone(), root_page);
+            let mut cursor = BTreeCursor::new_table(None, pager.clone(), root_page, num_columns);
             tracing::info!("INSERT INTO t VALUES ({});", i,);
             let regs = &[Register::Value(Value::Integer(i))];
             let value = ImmutableRecord::from_registers(regs, regs.len());
@@ -9089,7 +9110,7 @@ mod tests {
             format_btree(pager.clone(), root_page, 0)
         );
         for key in keys.iter() {
-            let mut cursor = BTreeCursor::new_table(None, pager.clone(), root_page);
+            let mut cursor = BTreeCursor::new_table(None, pager.clone(), root_page, num_columns);
             let key = Value::Integer(*key);
             let exists = run_until_done(|| cursor.exists(&key), pager.deref()).unwrap();
             assert!(exists, "key not found {}", key);
@@ -9135,10 +9156,11 @@ mod tests {
         //    values are actually deleted.
 
         let (pager, root_page, _, _) = empty_btree();
+        let num_columns = 5;
 
         // Insert 10,000 records in to the BTree.
         for i in 1..=10000 {
-            let mut cursor = BTreeCursor::new_table(None, pager.clone(), root_page);
+            let mut cursor = BTreeCursor::new_table(None, pager.clone(), root_page, num_columns);
             let regs = &[Register::Value(Value::Text(Text::new("hello world")))];
             let value = ImmutableRecord::from_registers(regs, regs.len());
 
@@ -9161,10 +9183,11 @@ mod tests {
         if let (_, false) = validate_btree(pager.clone(), root_page) {
             panic!("Invalid B-tree after insertion");
         }
+        let num_columns = 5;
 
         // Delete records with 500 <= key <= 3500
         for i in 500..=3500 {
-            let mut cursor = BTreeCursor::new_table(None, pager.clone(), root_page);
+            let mut cursor = BTreeCursor::new_table(None, pager.clone(), root_page, num_columns);
             let seek_key = SeekKey::TableRowId(i);
 
             let found = run_until_done(
@@ -9184,7 +9207,7 @@ mod tests {
                 continue;
             }
 
-            let mut cursor = BTreeCursor::new_table(None, pager.clone(), root_page);
+            let mut cursor = BTreeCursor::new_table(None, pager.clone(), root_page, num_columns);
             let key = Value::Integer(i);
             let exists = run_until_done(|| cursor.exists(&key), pager.deref()).unwrap();
             assert!(exists, "Key {} should exist but doesn't", i);
@@ -9192,7 +9215,7 @@ mod tests {
 
         // Verify the deleted records don't exist.
         for i in 500..=3500 {
-            let mut cursor = BTreeCursor::new_table(None, pager.clone(), root_page);
+            let mut cursor = BTreeCursor::new_table(None, pager.clone(), root_page, num_columns);
             let key = Value::Integer(i);
             let exists = run_until_done(|| cursor.exists(&key), pager.deref()).unwrap();
             assert!(!exists, "Deleted key {} still exists", i);
@@ -9212,9 +9235,10 @@ mod tests {
         }
 
         let (pager, root_page, _, _) = empty_btree();
+        let num_columns = 5;
 
         for (i, huge_text) in huge_texts.iter().enumerate().take(iterations) {
-            let mut cursor = BTreeCursor::new_table(None, pager.clone(), root_page);
+            let mut cursor = BTreeCursor::new_table(None, pager.clone(), root_page, num_columns);
             tracing::info!("INSERT INTO t VALUES ({});", i,);
             let regs = &[Register::Value(Value::Text(Text {
                 value: huge_text.as_bytes().to_vec(),
@@ -9244,7 +9268,7 @@ mod tests {
                 format_btree(pager.clone(), root_page, 0)
             );
         }
-        let mut cursor = BTreeCursor::new_table(None, pager.clone(), root_page);
+        let mut cursor = BTreeCursor::new_table(None, pager.clone(), root_page, num_columns);
         cursor.move_to_root().unwrap();
         for i in 0..iterations {
             let has_next = run_until_done(|| cursor.next(), pager.deref()).unwrap();
@@ -9261,7 +9285,8 @@ mod tests {
     #[test]
     pub fn test_read_write_payload_with_offset() {
         let (pager, root_page, _, _) = empty_btree();
-        let mut cursor = BTreeCursor::new(None, pager.clone(), root_page, vec![]);
+        let num_columns = 5;
+        let mut cursor = BTreeCursor::new(None, pager.clone(), root_page, vec![], num_columns);
         let offset = 2; // blobs data starts at offset 2
         let initial_text = "hello world";
         let initial_blob = initial_text.as_bytes().to_vec();
@@ -9337,7 +9362,8 @@ mod tests {
     #[test]
     pub fn test_read_write_payload_with_overflow_page() {
         let (pager, root_page, _, _) = empty_btree();
-        let mut cursor = BTreeCursor::new(None, pager.clone(), root_page, vec![]);
+        let num_columns = 5;
+        let mut cursor = BTreeCursor::new(None, pager.clone(), root_page, vec![], num_columns);
         let mut large_blob = vec![b'A'; 40960 - 11]; // insert large blob. 40960 = 10 page long.
         let hello_world = b"hello world";
         large_blob.extend_from_slice(hello_world);
