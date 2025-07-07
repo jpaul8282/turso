@@ -27,12 +27,12 @@ pub mod sorter;
 use crate::{
     error::LimboError,
     function::{AggFunc, FuncCtx},
-    storage::{pager::PagerCacheflushStatus, sqlite3_ondisk::SmallVec},
+    storage::{btree::BTree, pager::PagerCacheflushStatus, sqlite3_ondisk::SmallVec},
     translate::plan::TableReferences,
 };
 
 use crate::{
-    storage::{btree::BTreeCursor, pager::Pager},
+    storage::{btree_cursor::BTreeCursor, pager::Pager},
     translate::plan::ResultSetColumn,
     types::{AggContext, Cursor, CursorResult, ImmutableRecord, Value},
     vdbe::{builder::CursorType, insn::Insn},
@@ -373,7 +373,7 @@ impl Program {
         &self,
         state: &mut ProgramState,
         mv_store: Option<Rc<MvStore>>,
-        pager: Rc<Pager>,
+        btree: Rc<BTree>,
     ) -> Result<StepResult> {
         loop {
             if state.is_interrupted() {
@@ -383,11 +383,11 @@ impl Program {
             let _ = state.result_row.take();
             let (insn, insn_function) = &self.insns[state.pc as usize];
             trace_insn(self, state.pc as InsnReference, insn);
-            let res = insn_function(self, state, insn, &pager, mv_store.as_ref());
+            let res = insn_function(self, state, insn, &btree, mv_store.as_ref());
             if res.is_err() {
                 let state = self.connection.transaction_state.get();
                 if let TransactionState::Write { schema_did_change } = state {
-                    pager.rollback(schema_did_change, &self.connection)?
+                    btree.pager.rollback(schema_did_change, &self.connection)?
                 }
             }
             match res? {
