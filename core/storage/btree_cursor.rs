@@ -7018,7 +7018,7 @@ mod tests {
     }
 
     fn btree_index_insert_fuzz_run(attempts: usize, inserts: usize) {
-        use crate::storage::pager::CreateBTreeFlags;
+        use crate::storage::btree::CreateBTreeFlags;
 
         let (mut rng, seed) = if std::env::var("SEED").is_ok() {
             let seed = std::env::var("SEED").unwrap();
