@@ -433,6 +433,18 @@ pub enum CursorSeekState {
         /// Indicates when we have not not found a value in leaf and now will look in the next/prev record.
         /// This value is only used for indexbtree
         moving_up_to_parent: Cell<bool>,
+        /// In multiple places, we do a seek that checks for an exact match (SeekOp::EQ) in the tree.
+        /// In those cases, we need to know where to land if we don't find an exact match.
+        /// For non-eq-only conditions (GT, LT, GE, LE), this is pretty simple:
+        /// - If we are looking for GT/GE and don't find a match, we should end up beyond the end of the page (idx=cell count).
+        /// - If we are looking for LT/LE and don't find a match, we should end up before the beginning of the page (idx=-1).
+        ///
+        /// For eq-only conditions (GE { eq_only: true } or LE { eq_only: true }), we need to know where to land if we don't find an exact match.
+        /// For GE, we want to land at the first cell that is greater than the seek key.
+        /// For LE, we want to land at the last cell that is less than the seek key.
+        /// This is because e.g. when we attempt to insert rowid 666, we first check if it exists.
+        /// If it doesn't, we want to land in the place where rowid 666 WOULD be inserted.
+        target_cell_when_not_found: Cell<i32>,
     },
 }
 
@@ -1685,6 +1697,10 @@ impl BTreeCursor {
                 nearest_matching_cell,
                 moving_up_to_parent: Cell::new(false),
                 eq_seen: Cell::new(false), // not relevant for table btrees
+                target_cell_when_not_found: Cell::new(match seek_op.iteration_direction() {
+                    IterationDirection::Forwards => cell_count as i32,
+                    IterationDirection::Backwards => -1,
+                }),
             };
         }
 
@@ -1692,6 +1708,7 @@ impl BTreeCursor {
             min_cell_idx,
             max_cell_idx,
             nearest_matching_cell,
+            target_cell_when_not_found,
             ..
         } = &self.seek_state
         else {
@@ -1711,6 +1728,7 @@ impl BTreeCursor {
                     self.stack.set_cell_index(nearest_matching_cell as i32);
                     return Ok(CursorResult::Ok(true));
                 } else {
+                    self.stack.set_cell_index(target_cell_when_not_found.get());
                     return Ok(CursorResult::Ok(false));
                 };
             }
@@ -1746,8 +1764,16 @@ impl BTreeCursor {
                     }
                 }
             } else if cmp.is_gt() {
+                if matches!(seek_op, SeekOp::GE { eq_only: true }) {
+                    target_cell_when_not_found
+                        .set(target_cell_when_not_found.get().min(cur_cell_idx as i32));
+                }
                 max_cell_idx.set(cur_cell_idx - 1);
             } else if cmp.is_lt() {
+                if matches!(seek_op, SeekOp::LE { eq_only: true }) {
+                    target_cell_when_not_found
+                        .set(target_cell_when_not_found.get().max(cur_cell_idx as i32));
+                }
                 min_cell_idx.set(cur_cell_idx + 1);
             } else {
                 match iter_dir {
@@ -1807,6 +1833,10 @@ impl BTreeCursor {
                 nearest_matching_cell,
                 moving_up_to_parent: Cell::new(false),
                 eq_seen: Cell::new(eq_seen),
+                target_cell_when_not_found: Cell::new(match seek_op.iteration_direction() {
+                    IterationDirection::Forwards => cell_count as i32,
+                    IterationDirection::Backwards => -1,
+                }),
             };
         }
 
@@ -1816,6 +1846,7 @@ impl BTreeCursor {
             nearest_matching_cell,
             eq_seen,
             moving_up_to_parent,
+            target_cell_when_not_found,
         } = &self.seek_state
         else {
             unreachable!(
@@ -1863,7 +1894,6 @@ impl BTreeCursor {
         return_if_locked_maybe_load!(self.pager, page);
         let page = page.get();
         let contents = page.get().contents.as_ref().unwrap();
-        let cell_count = contents.cell_count();
 
         let iter_dir = seek_op.iteration_direction();
 
@@ -1895,24 +1925,14 @@ impl BTreeCursor {
                     // - We have seen an EQ match up in the tree in an interior node
                     // - Or, we are not looking for an exact match.
                     if seek_op.eq_only() && !eq_seen.get() {
-                        match iter_dir {
-                            IterationDirection::Forwards => {
-                                // Set cell index beyond the last cell, so that the state looks like we scanned the entire page and found no match.
-                                self.stack.set_cell_index(cell_count as i32);
-                                return Ok(CursorResult::Ok(false));
-                            }
-                            IterationDirection::Backwards => {
-                                // Set cell index to -1, so that the state looks like we scanned the entire page backwards and found no match.
-                                self.stack.set_cell_index(-1);
-                                return Ok(CursorResult::Ok(false));
-                            }
-                        }
+                        self.stack.set_cell_index(target_cell_when_not_found.get());
+                        return Ok(CursorResult::Ok(false));
                     }
                     match iter_dir {
                         IterationDirection::Forwards => {
                             if !moving_up_to_parent.get() {
                                 moving_up_to_parent.set(true);
-                                self.stack.set_cell_index(cell_count as i32);
+                                self.stack.set_cell_index(target_cell_when_not_found.get());
                             }
                             let next_res = return_if_io!(self.next());
                             if !next_res {
@@ -1924,7 +1944,7 @@ impl BTreeCursor {
                         IterationDirection::Backwards => {
                             if !moving_up_to_parent.get() {
                                 moving_up_to_parent.set(true);
-                                self.stack.set_cell_index(-1);
+                                self.stack.set_cell_index(target_cell_when_not_found.get());
                             }
                             let prev_res = return_if_io!(self.prev());
                             if !prev_res {
@@ -1975,8 +1995,16 @@ impl BTreeCursor {
                     }
                 }
             } else if cmp.is_gt() {
+                if matches!(seek_op, SeekOp::GE { eq_only: true }) {
+                    target_cell_when_not_found
+                        .set(target_cell_when_not_found.get().min(cur_cell_idx as i32));
+                }
                 max_cell_idx.set(cur_cell_idx - 1);
             } else if cmp.is_lt() {
+                if matches!(seek_op, SeekOp::LE { eq_only: true }) {
+                    target_cell_when_not_found
+                        .set(target_cell_when_not_found.get().max(cur_cell_idx as i32));
+                }
                 min_cell_idx.set(cur_cell_idx + 1);
             } else {
                 match iter_dir {
@@ -2104,8 +2132,13 @@ impl BTreeCursor {
                         self.pager.add_dirty(page.get().id);
 
                         let page = page.get().contents.as_mut().unwrap();
-                        (self.stack.current_cell_index() as usize, page.page_type())
+                        (self.stack.current_cell_index(), page.page_type())
                     };
+                    if cell_idx == -1 {
+                        // This might be a brand new table and the cursor hasn't moved yet. Let's advance it to the first slot.
+                        self.stack.set_cell_index(0);
+                    }
+                    let cell_idx = self.stack.current_cell_index() as usize;
                     tracing::debug!(cell_idx);
 
                     // if the cell index is less than the total cells, check: if its an existing
