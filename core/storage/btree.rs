@@ -1122,6 +1122,36 @@ impl BTreeCursor {
             .copy_from_slice(&buffer[..num_bytes as usize]);
     }
 
+    /// Check if any ancestor pages still have cells to iterate.
+    /// If not, traversing back up to parent is of no use because we are at the end of the tree.
+    fn ancestor_pages_have_more_children(&self) -> Result<CursorResult<bool>> {
+        let has_parent = self.stack.has_parent();
+        if !has_parent {
+            return Ok(CursorResult::Ok(false));
+        }
+
+        let cell_indices = self.stack.cell_indices.borrow();
+        let mut current_parent_stack_idx = self.stack.current() as isize - 1;
+        while current_parent_stack_idx >= 0 {
+            let parent_cell_idx = cell_indices[current_parent_stack_idx as usize];
+            let parent_page = self.stack.stack.borrow()[current_parent_stack_idx as usize]
+                .as_ref()
+                .unwrap()
+                .get();
+            let mem_page = self.read_page(parent_page.get().id)?;
+            let parent_page = mem_page.get();
+            if parent_page.is_locked() {
+                return Ok(CursorResult::IO);
+            }
+            let parent_contents = parent_page.get_contents();
+            if parent_contents.cell_count() as i32 > parent_cell_idx {
+                return Ok(CursorResult::Ok(true));
+            }
+            current_parent_stack_idx -= 1;
+        }
+        Ok(CursorResult::Ok(false))
+    }
+
     /// Move the cursor to the next record and return it.
     /// Used in forwards iteration, which is the default.
     #[instrument(skip(self), level = Level::INFO, name = "next")]
@@ -1151,6 +1181,22 @@ impl BTreeCursor {
                 "current_before_advance",
             );
 
+            // There are cases when we need to check whether it makes sense to go up to the parent page. If any ancestors don't have more children to iterate,
+            // that means we are at the end of the btree and should stop iterating.
+            //
+            // We have to do this ancestor_pages_have_more_children check before advancing or mutating any internal state because the check itself might yield IO due to loading parent pages.
+            // If we would do it after advancing, we might advance multiple times or flip going_upwards state, etc.
+            // FIXME: i guess this should be a state machine as well instead of this fragile adhoc logic...
+            let going_upwards_is_possible = {
+                let cell_idx = self.stack.current_cell_index();
+                // -1 because of the above reason (we haven't advanced yet, but will)
+                if cell_idx < cell_count as i32 - 1 {
+                    false // it's not valid to go upwards if we are not at the end of the page.
+                } else {
+                    return_if_io!(self.ancestor_pages_have_more_children())
+                }
+            };
+
             let is_index = mem_page_rc.get().is_index();
             let should_skip_advance = is_index
                 && self.going_upwards // we are going upwards, this means we still need to visit divider cell in an index
@@ -1167,23 +1213,24 @@ impl BTreeCursor {
                 self.going_upwards = false;
                 return Ok(CursorResult::Ok(true));
             }
+
             // Important to advance only after loading the page in order to not advance > 1 times
             self.stack.advance();
             let cell_idx = self.stack.current_cell_index() as usize;
             tracing::debug!(id = mem_page_rc.get().get().id, cell = cell_idx, "current");
 
-            if cell_idx == cell_count {
-                // do rightmost
-                let has_parent = self.stack.has_parent();
-                match contents.rightmost_pointer() {
-                    Some(right_most_pointer) => {
+            if cell_idx >= cell_count {
+                let rightmost_already_traversed = cell_idx > cell_count;
+                match (contents.rightmost_pointer(), rightmost_already_traversed) {
+                    (Some(right_most_pointer), false) => {
+                        // do rightmost
                         self.stack.advance();
                         let mem_page = self.read_page(right_most_pointer as usize)?;
                         self.stack.push(mem_page);
                         continue;
                     }
-                    None => {
-                        if has_parent {
+                    _ => {
+                        if going_upwards_is_possible {
                             tracing::trace!("moving simple upwards");
                             self.going_upwards = true;
                             self.stack.pop();
@@ -1195,19 +1242,14 @@ impl BTreeCursor {
                 }
             }
 
-            if cell_idx > contents.cell_count() {
-                // end
-                let has_parent = self.stack.current() > 0;
-                if has_parent {
-                    tracing::debug!("moving upwards");
-                    self.going_upwards = true;
-                    self.stack.pop();
-                    continue;
-                } else {
-                    return Ok(CursorResult::Ok(false));
-                }
-            }
-            turso_assert!(cell_idx < contents.cell_count(), "cell index out of bounds");
+            turso_assert!(
+                cell_idx < contents.cell_count(),
+                "cell index out of bounds: cell_idx={}, cell_count={}, page_type={:?} page_id={}",
+                cell_idx,
+                contents.cell_count(),
+                contents.page_type(),
+                mem_page_rc.get().get().id
+            );
 
             let cell = contents.cell_get(
                 cell_idx,
@@ -5518,7 +5560,7 @@ struct PageStack {
     /// Pointer to the current page being consumed
     current_page: Cell<i32>,
     /// List of pages in the stack. Root page will be in index 0
-    stack: RefCell<[Option<BTreePage>; BTCURSOR_MAX_DEPTH + 1]>,
+    pub stack: RefCell<[Option<BTreePage>; BTCURSOR_MAX_DEPTH + 1]>,
     /// List of cell indices in the stack.
     /// cell_indices[current_page] is the current cell index being consumed. Similarly
     /// cell_indices[current_page-1] is the cell index of the parent of the current page
