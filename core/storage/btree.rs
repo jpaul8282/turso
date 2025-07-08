@@ -4741,7 +4741,7 @@ impl BTreeCursor {
                 // Existing record found — compare
                 let mut record_cursor = self.record_cursor.borrow_mut();
                 let count = record_cursor.count(key);
-                let existing_key = &record.get_values()[..record.count().saturating_sub(1)];
+                let existing_key = &record.get_values()[..count.saturating_sub(1)];
                 let inserted_key_vals = &key.get_values();
                 // Need this check because .all returns True on an empty iterator,
                 // So when record_opt is invalidated, it would always indicate show up as a duplicate key
