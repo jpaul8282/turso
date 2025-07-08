@@ -512,7 +512,7 @@ pub struct BTreeCursor {
 /// We store the cell index and cell count for each page in the stack.
 /// The reason we store the cell count is because we need to know when we are at the end of the page,
 /// without having to perform IO to get the ancestor pages.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct BTreeNodeState {
     cell_idx: i32,
     cell_count: Option<i32>,
@@ -526,15 +526,6 @@ impl BTreeNodeState {
     fn is_at_end(&self) -> bool {
         let cell_count = self.cell_count.expect("cell_count is not set");
         self.cell_idx == cell_count + 1 // +1 because of the rightmost pointer
-    }
-}
-
-impl Default for BTreeNodeState {
-    fn default() -> Self {
-        Self {
-            cell_idx: 0,
-            cell_count: None,
-        }
     }
 }
 
