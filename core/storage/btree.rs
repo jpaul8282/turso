@@ -1153,17 +1153,17 @@ impl BTreeCursor {
 
     /// Check if any ancestor pages still have cells to iterate.
     /// If not, traversing back up to parent is of no use because we are at the end of the tree.
-    fn ancestor_pages_have_more_children(&self) -> Result<CursorResult<bool>> {
+    fn ancestor_pages_have_more_children(&self) -> bool {
         let has_parent = self.stack.has_parent();
         if !has_parent {
-            return Ok(CursorResult::Ok(false));
+            return false;
         }
 
         let cell_indices = self.stack.cell_indices.borrow();
         let has_non_end_ancestor = (0..self.stack.current())
             .rev()
             .any(|idx| !cell_indices[idx].is_at_end());
-        return Ok(CursorResult::Ok(has_non_end_ancestor));
+        return has_non_end_ancestor;
     }
 
     /// Move the cursor to the next record and return it.
@@ -1194,22 +1194,6 @@ impl BTreeCursor {
                 cell_count,
                 "current_before_advance",
             );
-
-            // There are cases when we need to check whether it makes sense to go up to the parent page. If any ancestors don't have more children to iterate,
-            // that means we are at the end of the btree and should stop iterating.
-            //
-            // We have to do this ancestor_pages_have_more_children check before advancing or mutating any internal state because the check itself might yield IO due to loading parent pages.
-            // If we would do it after advancing, we might advance multiple times or flip going_upwards state, etc.
-            // FIXME: i guess this should be a state machine as well instead of this fragile adhoc logic...
-            let going_upwards_is_possible = {
-                let cell_idx = self.stack.current_cell_index();
-                // -1 because of the above reason (we haven't advanced yet, but will)
-                if cell_idx < cell_count as i32 - 1 {
-                    false // it's not valid to go upwards if we are not at the end of the page.
-                } else {
-                    return_if_io!(self.ancestor_pages_have_more_children())
-                }
-            };
 
             let is_index = mem_page_rc.get().is_index();
             let should_skip_advance = is_index
@@ -1244,12 +1228,13 @@ impl BTreeCursor {
                         continue;
                     }
                     _ => {
-                        if going_upwards_is_possible {
+                        if self.ancestor_pages_have_more_children() {
                             tracing::trace!("moving simple upwards");
                             self.going_upwards = true;
                             self.stack.pop();
                             continue;
                         } else {
+                            // If none of the ancestor pages have more children to iterate, that means we are at the end of the btree and should stop iterating.
                             return Ok(CursorResult::Ok(false));
                         }
                     }
