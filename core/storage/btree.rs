@@ -509,6 +509,35 @@ pub struct BTreeCursor {
     find_cell_state: FindCellState,
 }
 
+/// We store the cell index and cell count for each page in the stack.
+/// The reason we store the cell count is because we need to know when we are at the end of the page,
+/// without having to perform IO to get the ancestor pages.
+#[derive(Debug, Clone, Copy)]
+struct BTreeNodeState {
+    cell_idx: i32,
+    cell_count: Option<i32>,
+}
+
+impl BTreeNodeState {
+    /// Check if the current cell index is at the end of the page.
+    /// This information is used to determine whether a child page should move up to its parent.
+    /// If the child page is the rightmost leaf page and it has reached the end, this means it should
+    /// not go up because there are no more records to traverse.
+    fn is_at_end(&self) -> bool {
+        let cell_count = self.cell_count.expect("cell_count is not set");
+        self.cell_idx == cell_count + 1 // +1 because of the rightmost pointer
+    }
+}
+
+impl Default for BTreeNodeState {
+    fn default() -> Self {
+        Self {
+            cell_idx: 0,
+            cell_count: None,
+        }
+    }
+}
+
 impl BTreeCursor {
     pub fn new(
         mv_cursor: Option<Rc<RefCell<MvCursor>>>,
@@ -527,7 +556,7 @@ impl BTreeCursor {
             overflow_state: None,
             stack: PageStack {
                 current_page: Cell::new(-1),
-                cell_indices: RefCell::new([0; BTCURSOR_MAX_DEPTH + 1]),
+                cell_indices: RefCell::new([BTreeNodeState::default(); BTCURSOR_MAX_DEPTH + 1]),
                 stack: RefCell::new([const { None }; BTCURSOR_MAX_DEPTH + 1]),
             },
             reusable_immutable_record: RefCell::new(None),
@@ -1131,25 +1160,10 @@ impl BTreeCursor {
         }
 
         let cell_indices = self.stack.cell_indices.borrow();
-        let mut current_parent_stack_idx = self.stack.current() as isize - 1;
-        while current_parent_stack_idx >= 0 {
-            let parent_cell_idx = cell_indices[current_parent_stack_idx as usize];
-            let parent_page = self.stack.stack.borrow()[current_parent_stack_idx as usize]
-                .as_ref()
-                .unwrap()
-                .get();
-            let mem_page = self.read_page(parent_page.get().id)?;
-            let parent_page = mem_page.get();
-            if parent_page.is_locked() {
-                return Ok(CursorResult::IO);
-            }
-            let parent_contents = parent_page.get_contents();
-            if parent_contents.cell_count() as i32 > parent_cell_idx {
-                return Ok(CursorResult::Ok(true));
-            }
-            current_parent_stack_idx -= 1;
-        }
-        Ok(CursorResult::Ok(false))
+        let has_non_end_ancestor = (0..self.stack.current())
+            .rev()
+            .any(|idx| !cell_indices[idx].is_at_end());
+        return Ok(CursorResult::Ok(has_non_end_ancestor));
     }
 
     /// Move the cursor to the next record and return it.
@@ -5568,7 +5582,7 @@ struct PageStack {
     /// There are two points that need special attention:
     ///  If cell_indices[current_page] = -1, it indicates that the current iteration has reached the start of the current_page
     ///  If cell_indices[current_page] = `cell_count`, it means that the current iteration has reached the end of the current_page
-    cell_indices: RefCell<[i32; BTCURSOR_MAX_DEPTH + 1]>,
+    cell_indices: RefCell<[BTreeNodeState; BTCURSOR_MAX_DEPTH + 1]>,
 }
 
 impl PageStack {
@@ -5587,6 +5601,7 @@ impl PageStack {
             current = self.current_page.get(),
             new_page_id = page.get().get().id,
         );
+        self.populate_parent_cell_count();
         self.increment_current();
         let current = self.current_page.get();
         assert!(
@@ -5595,7 +5610,27 @@ impl PageStack {
         );
         assert!(current >= 0);
         self.stack.borrow_mut()[current as usize] = Some(page);
-        self.cell_indices.borrow_mut()[current as usize] = starting_cell_idx;
+        self.cell_indices.borrow_mut()[current as usize] = BTreeNodeState {
+            cell_idx: starting_cell_idx,
+            cell_count: None, // we don't know the cell count yet, so we set it to None. any code pushing a child page onto the stack MUST set the parent page's cell_count.
+        };
+    }
+
+    /// Populate the parent page's cell count.
+    /// This is needed so that we can, from a child page, check of ancestor pages' position relative to its cell index
+    /// without having to perform IO to get the ancestor page contents.
+    fn populate_parent_cell_count(&self) {
+        let stack_empty = self.current_page.get() == -1;
+        if stack_empty {
+            return;
+        }
+        let current = self.current();
+        let stack = self.stack.borrow();
+        let page = stack[current].as_ref().unwrap();
+        let page = page.get();
+        let contents = page.get_contents();
+        let cell_count = contents.cell_count() as i32;
+        self.cell_indices.borrow_mut()[current].cell_count = Some(cell_count);
     }
 
     fn push(&self, page: BTreePage) {
@@ -5613,7 +5648,7 @@ impl PageStack {
         let current = self.current_page.get();
         assert!(current >= 0);
         tracing::trace!(current);
-        self.cell_indices.borrow_mut()[current as usize] = 0;
+        self.cell_indices.borrow_mut()[current as usize] = BTreeNodeState::default();
         self.stack.borrow_mut()[current as usize] = None;
         self.decrement_current();
     }
@@ -5640,7 +5675,7 @@ impl PageStack {
     /// Cell index of the current page
     fn current_cell_index(&self) -> i32 {
         let current = self.current();
-        self.cell_indices.borrow()[current]
+        self.cell_indices.borrow()[current].cell_idx
     }
 
     /// Check if the current cell index is less than 0.
@@ -5656,25 +5691,25 @@ impl PageStack {
     fn advance(&self) {
         let current = self.current();
         tracing::trace!(
-            curr_cell_index = self.cell_indices.borrow()[current],
-            cell_indices = ?self.cell_indices,
+            curr_cell_index = self.cell_indices.borrow()[current].cell_idx,
+            cell_indices = ?self.cell_indices.borrow().iter().map(|state| state.cell_idx).collect::<Vec<_>>(),
         );
-        self.cell_indices.borrow_mut()[current] += 1;
+        self.cell_indices.borrow_mut()[current].cell_idx += 1;
     }
 
     #[instrument(skip(self), level = Level::INFO, name = "pagestack::retreat")]
     fn retreat(&self) {
         let current = self.current();
         tracing::trace!(
-            curr_cell_index = self.cell_indices.borrow()[current],
-            cell_indices = ?self.cell_indices,
+            curr_cell_index = self.cell_indices.borrow()[current].cell_idx,
+            cell_indices = ?self.cell_indices.borrow().iter().map(|state| state.cell_idx).collect::<Vec<_>>(),
         );
-        self.cell_indices.borrow_mut()[current] -= 1;
+        self.cell_indices.borrow_mut()[current].cell_idx -= 1;
     }
 
     fn set_cell_index(&self, idx: i32) {
         let current = self.current();
-        self.cell_indices.borrow_mut()[current] = idx;
+        self.cell_indices.borrow_mut()[current].cell_idx = idx;
     }
 
     fn has_parent(&self) -> bool {
