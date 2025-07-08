@@ -338,6 +338,7 @@ mod tests {
             }
             i += 1;
             expected.push(val);
+            println!("expected: {:?}", expected);
             let ret = limbo_exec_rows(&db, &conn, &format!("INSERT INTO t VALUES ({})", val));
             assert!(ret.is_empty(), "Insert failed for value {}: {:?}", val, ret);
         }
