@@ -1155,10 +1155,9 @@ impl BTreeCursor {
     /// If not, traversing back up to parent is of no use because we are at the end of the tree.
     fn ancestor_pages_have_more_children(&self) -> bool {
         let node_states = self.stack.node_states.borrow();
-        let has_non_end_ancestor = (0..self.stack.current())
+        (0..self.stack.current())
             .rev()
-            .any(|idx| !node_states[idx].is_at_end());
-        has_non_end_ancestor
+            .any(|idx| !node_states[idx].is_at_end())
     }
 
     /// Move the cursor to the next record and return it.
