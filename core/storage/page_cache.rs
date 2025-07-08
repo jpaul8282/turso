@@ -280,16 +280,17 @@ impl DumbLruPageCache {
         while need_to_evict > 0 && current_opt.is_some() {
             let current = current_opt.unwrap();
             let entry = unsafe { current.as_ref() };
-            current_opt = entry.prev; // Pick prev before modifying entry
-                                      // pin interior pages - do not detach
-                                      // interior pages are a tiny minority of pages in a btree, and keeping them pinned
-                                      // improves btree seeks by reducing IO.
-                                      // it also simplifies some of our operations so that we can assume that if a parent page was traversed earlier,
-                                      // it's still present in the cache.
+            // Pick prev before modifying entry
+            current_opt = entry.prev;
             if matches!(
                 entry.page.get_contents().maybe_page_type(),
                 Some(PageType::TableInterior | PageType::IndexInterior)
             ) {
+                // pin interior pages - do not detach
+                // interior pages are a tiny minority of pages in a btree, and keeping them pinned
+                // improves btree seeks by reducing IO.
+                // it also simplifies some of our operations so that we can assume that if a parent page was traversed earlier,
+                // it's still present in the cache.
                 continue;
             }
             match self.delete(entry.key.clone()) {
