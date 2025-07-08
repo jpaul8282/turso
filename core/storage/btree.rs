@@ -521,8 +521,8 @@ struct BTreeNodeState {
 impl BTreeNodeState {
     /// Check if the current cell index is at the end of the page.
     /// This information is used to determine whether a child page should move up to its parent.
-    /// If the child page is the rightmost leaf page and it has reached the end, this means it should
-    /// not go up because there are no more records to traverse.
+    /// If the child page is the rightmost leaf page and it has reached the end, this means all of its ancestors have
+    /// already reached the end, so it should not go up because there are no more records to traverse.
     fn is_at_end(&self) -> bool {
         let cell_count = self.cell_count.expect("cell_count is not set");
         self.cell_idx == cell_count + 1 // +1 because of the rightmost pointer
