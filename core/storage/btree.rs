@@ -5619,6 +5619,9 @@ impl PageStack {
     /// Populate the parent page's cell count.
     /// This is needed so that we can, from a child page, check of ancestor pages' position relative to its cell index
     /// without having to perform IO to get the ancestor page contents.
+    ///
+    /// This rests on the assumption that the parent page is already in memory whenever a child is pushed onto the stack.
+    /// We currently ensure this by pinning interior pages to the page cache so that they cannot be evicted.
     fn populate_parent_cell_count(&self) {
         let stack_empty = self.current_page.get() == -1;
         if stack_empty {

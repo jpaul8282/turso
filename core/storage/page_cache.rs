@@ -3,6 +3,8 @@ use std::{cell::RefCell, ptr::NonNull};
 use std::sync::Arc;
 use tracing::{debug, trace};
 
+use crate::storage::sqlite3_ondisk::PageType;
+
 use super::pager::PageRef;
 
 const DEFAULT_PAGE_CACHE_SIZE_IN_PAGES: usize = 2000;
@@ -135,6 +137,7 @@ impl DumbLruPageCache {
         }
 
         let ptr = *self.map.borrow().get(&key).unwrap();
+
         // Try to detach from LRU list first, can fail
         self.detach(ptr, clean_page)?;
         let ptr = self.map.borrow_mut().remove(&key).unwrap();
@@ -278,6 +281,17 @@ impl DumbLruPageCache {
             let current = current_opt.unwrap();
             let entry = unsafe { current.as_ref() };
             current_opt = entry.prev; // Pick prev before modifying entry
+                                      // pin interior pages - do not detach
+                                      // interior pages are a tiny minority of pages in a btree, and keeping them pinned
+                                      // improves btree seeks by reducing IO.
+                                      // it also simplifies some of our operations so that we can assume that if a parent page was traversed earlier,
+                                      // it's still present in the cache.
+            if matches!(
+                entry.page.get_contents().maybe_page_type(),
+                Some(PageType::TableInterior | PageType::IndexInterior)
+            ) {
+                continue;
+            }
             match self.delete(entry.key.clone()) {
                 Err(_) => {}
                 Ok(_) => need_to_evict -= 1,
