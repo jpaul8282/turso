@@ -525,7 +525,9 @@ impl BTreeNodeState {
     /// already reached the end, so it should not go up because there are no more records to traverse.
     fn is_at_end(&self) -> bool {
         let cell_count = self.cell_count.expect("cell_count is not set");
-        self.cell_idx == cell_count + 1 // +1 because of the rightmost pointer
+        // cell_idx == cell_count means: we will traverse to the rightmost pointer next.
+        // cell_idx == cell_count + 1 means: we have already gone down to the rightmost pointer.
+        self.cell_idx == cell_count + 1
     }
 }
 
